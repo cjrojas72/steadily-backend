@@ -22,4 +22,6 @@ def validate_create(data):
         "category_id": data["category_id"],
         "limit_amount": str(data["limit_amount"]),
         "period": data.get("period", "monthly"),
+        "title": data.get("title", ""),
+        "description": data.get("description", ""),
     }, None
