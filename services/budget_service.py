@@ -17,10 +17,13 @@ def _has_column(cur, table, column):
 def get_budgets(profile_id):
     """
     Fetch all budgets with spent_amount calculated from expense transactions.
-    If the income_applied column exists, it is subtracted from the spent total.
+    Only transactions that occurred on or after the budget's created_at date
+    are counted, so new budgets always start at $0 spent.
+    If the income_applied column exists, it raises the budget ceiling.
     """
     with get_cursor() as cur:
         has_income_applied = _has_column(cur, "budgets", "income_applied")
+        has_created_at = _has_column(cur, "budgets", "created_at")
 
         spent_expr = """
             COALESCE(SUM(
@@ -34,6 +37,12 @@ def get_budgets(profile_id):
         else:
             limit_expr = "b.limit_amount"
 
+        # Only count transactions created after the budget was created
+        created_at_filter = (
+            "AND t.transaction_date >= b.created_at::date"
+            if has_created_at else ""
+        )
+
         cur.execute(
             f"""
             SELECT b.*,
@@ -46,6 +55,7 @@ def get_budgets(profile_id):
               LEFT JOIN transactions t
                 ON t.profile_id = b.profile_id
                AND t.category_id = b.category_id
+               {created_at_filter}
                AND (
                    (b.period = 'monthly'
                     AND EXTRACT(YEAR FROM t.transaction_date) = EXTRACT(YEAR FROM CURRENT_DATE)
