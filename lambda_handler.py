@@ -1,7 +1,7 @@
 import json
 
 from routes import auth, transactions, categories, budgets, analytics
-from utils.response import success, error, cors_preflight
+from utils.response import success, error, cors_preflight, set_request_origin
 
 
 def handler(event, context):
@@ -11,6 +11,9 @@ def handler(event, context):
         event.get("requestContext", {}).get("http", {}).get("method")
         or event.get("httpMethod", "")
     )
+
+    # Match CORS origin to the requesting domain
+    set_request_origin(event)
 
     # CORS preflight
     if method == "OPTIONS":

@@ -5,6 +5,10 @@ from decimal import Decimal
 
 import config
 
+# Stores the current request origin — set by set_request_origin() at the
+# start of each Lambda invocation so CORS headers match the caller.
+_current_origin = None
+
 
 class _Encoder(json.JSONEncoder):
     def default(self, obj):
@@ -17,8 +21,20 @@ class _Encoder(json.JSONEncoder):
         return super().default(obj)
 
 
+def set_request_origin(event):
+    """Extract the Origin header from the request and allow it if it's
+    in the configured CORS_ORIGINS list."""
+    global _current_origin
+    headers = event.get("headers") or {}
+    origin = headers.get("origin") or headers.get("Origin") or ""
+    if origin in config.CORS_ORIGINS:
+        _current_origin = origin
+    else:
+        _current_origin = config.CORS_ORIGINS[0] if config.CORS_ORIGINS else "*"
+
+
 def _cors_headers():
-    origin = config.CORS_ORIGINS[0] if config.CORS_ORIGINS else "*"
+    origin = _current_origin or (config.CORS_ORIGINS[0] if config.CORS_ORIGINS else "*")
     return {
         "Content-Type": "application/json",
         "Access-Control-Allow-Origin": origin,
