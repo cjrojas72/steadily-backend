@@ -4,22 +4,45 @@ from decimal import Decimal
 from db import get_cursor
 
 
+def _has_column(cur, table, column):
+    """Check if a column exists on a table."""
+    cur.execute(
+        """SELECT 1 FROM information_schema.columns
+           WHERE table_name = %s AND column_name = %s""",
+        (table, column),
+    )
+    return cur.fetchone() is not None
+
+
 def get_budgets(profile_id):
     """
-    Fetch all budgets with spent_amount calculated from expense transactions
-    and reduced by any income_applied on the budget.
+    Fetch all budgets with spent_amount calculated from expense transactions.
+    If the income_applied column exists, it is subtracted from the spent total.
     """
     with get_cursor() as cur:
+        has_income_applied = _has_column(cur, "budgets", "income_applied")
+
+        spent_expr = """
+            COALESCE(SUM(
+                CASE WHEN t.type = 'expense' THEN t.amount ELSE 0 END
+            ), 0)
+        """
+
+        # Income applied increases the budget ceiling, not reduces spent
+        if has_income_applied:
+            limit_expr = "b.limit_amount + COALESCE(b.income_applied, 0)"
+        else:
+            limit_expr = "b.limit_amount"
+
         cur.execute(
-            """
+            f"""
             SELECT b.*,
-                   GREATEST(
-                       COALESCE(SUM(
-                           CASE WHEN t.type = 'expense' THEN t.amount ELSE 0 END
-                       ), 0) - b.income_applied,
-                       0
-                   ) AS spent_amount
+                   c.name AS category_name,
+                   c.color AS category_color,
+                   {spent_expr} AS spent_amount,
+                   ({limit_expr}) AS effective_limit
               FROM budgets b
+              LEFT JOIN categories c ON c.id = b.category_id
               LEFT JOIN transactions t
                 ON t.profile_id = b.profile_id
                AND t.category_id = b.category_id
@@ -34,7 +57,7 @@ def get_budgets(profile_id):
                     AND EXTRACT(YEAR FROM t.transaction_date) = EXTRACT(YEAR FROM CURRENT_DATE))
                )
              WHERE b.profile_id = %s
-             GROUP BY b.id
+             GROUP BY b.id, c.name, c.color
             """,
             (profile_id,),
         )
@@ -87,10 +110,14 @@ def apply_income_to_budgets(profile_id, allocations):
     dollar value to apply (already calculated from percentage * total).
     """
     with get_cursor(commit=True) as cur:
+        if not _has_column(cur, "budgets", "income_applied"):
+            # Column not added yet — skip silently
+            return
+
         for alloc in allocations:
             cur.execute(
                 """UPDATE budgets
-                   SET income_applied = income_applied + %s
+                   SET income_applied = COALESCE(income_applied, 0) + %s
                    WHERE id = %s AND profile_id = %s""",
                 (str(alloc["amount"]), alloc["budget_id"], profile_id),
             )
