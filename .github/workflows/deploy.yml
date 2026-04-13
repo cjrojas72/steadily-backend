@@ -1,0 +1,47 @@
+name: Deploy to Lambda
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies into package directory
+        run: |
+          pip install \
+            --platform manylinux2014_x86_64 \
+            --implementation cp \
+            --only-binary=:all: \
+            -r requirements.txt \
+            -t package/
+
+      - name: Copy application code into package
+        run: |
+          cp lambda_handler.py config.py db.py package/
+          cp -r routes/ services/ middleware/ schemas/ utils/ package/
+
+      - name: Create deployment zip
+        run: cd package && zip -r ../deployment.zip .
+
+      - name: Deploy to AWS Lambda
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Update Lambda function code
+        run: |
+          aws lambda update-function-code \
+            --function-name ${{ secrets.LAMBDA_FUNCTION_NAME }} \
+            --zip-file fileb://deployment.zip
