@@ -33,6 +33,29 @@ def create_category(profile_id, data):
         return cur.fetchone()
 
 
+def ensure_income_category(profile_id):
+    with get_cursor(commit=True) as cur:
+        cur.execute(
+            "SELECT id FROM categories WHERE profile_id = %s AND lower(name) = 'income' LIMIT 1",
+            (profile_id,),
+        )
+        if cur.fetchone():
+            return
+
+        cur.execute(
+            """INSERT INTO categories (id, profile_id, name, color, icon, is_default)
+               VALUES (%s, %s, %s, %s, %s, %s)""",
+            (
+                str(uuid.uuid4()),
+                profile_id,
+                "Income",
+                "#1D9E75",
+                "trending-up",
+                True,
+            ),
+        )
+
+
 def update_category(profile_id, category_id, data):
     if not data:
         return get_category(profile_id, category_id)

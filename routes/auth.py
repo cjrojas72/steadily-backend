@@ -3,6 +3,7 @@ import requests as http_client
 import config
 from db import get_cursor
 from middleware.auth import authenticate
+from services import category_service
 from utils.response import error, get_body, success
 
 
@@ -45,6 +46,10 @@ def _ensure_profile(user_data):
             )
 
 
+def _ensure_income_category(profile_id):
+    category_service.ensure_income_category(profile_id)
+
+
 def signup(event):
     body = get_body(event)
     if not body:
@@ -74,8 +79,11 @@ def signup(event):
 
     result = resp.json()
 
-    if result.get("access_token"):
+    if result.get("user"):
         _ensure_profile(result["user"])
+        _ensure_income_category(result["user"]["id"])
+
+    if result.get("access_token"):
         return success({
             "access_token": result["access_token"],
             "refresh_token": result["refresh_token"],
@@ -110,6 +118,7 @@ def login(event):
 
     result = resp.json()
     _ensure_profile(result["user"])
+    _ensure_income_category(result["user"]["id"])
 
     return success({
         "access_token": result["access_token"],
