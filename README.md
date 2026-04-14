@@ -2,6 +2,9 @@
 
 Lightweight Python REST API for the Steadily personal finance app. Designed to run on AWS Lambda with API Gateway — no web framework, just plain Python + psycopg2.
 
+Deployed URL: https://d17qicjfvn0awy.cloudfront.net/
+Frontend Repo: https://github.com/cjrojas72/steadily
+
 ## Project Structure
 
 ```
