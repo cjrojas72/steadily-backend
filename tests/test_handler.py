@@ -86,6 +86,14 @@ def test_auth_login_missing_fields():
     assert result["statusCode"] == 422
 
 
+def test_unauthenticated_profile():
+    from lambda_handler import handler
+
+    event = make_event("GET", "/api/profile")
+    result = handler(event, None)
+    assert result["statusCode"] == 401
+
+
 def test_response_format():
     """Every response should have data and error keys."""
     from lambda_handler import handler

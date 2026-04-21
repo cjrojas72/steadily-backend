@@ -105,6 +105,8 @@ Configure with route: `ANY /api/{proxy+}`
 | DELETE | `/api/budgets/:id` | Yes | Delete |
 | GET | `/api/analytics/monthly-spending` | Yes | By category per month |
 | GET | `/api/analytics/monthly-totals` | Yes | Income/expense per month |
+| GET | `/api/profile` | Yes | Current user's profile fields |
+| PATCH | `/api/profile` | Yes | Update first_name / last_name / phone1 / display_name |
 
 ### Transaction Query Params
 
@@ -115,3 +117,73 @@ Configure with route: `ANY /api/{proxy+}`
 ```bash
 pytest tests/ -v
 ```
+
+## Change Log
+
+### Profile endpoints (`/api/profile`)
+
+New `routes/profile.py`, `services/profile_service.py`, and
+`schemas/profile_schema.py` surface an authenticated profile read/update API:
+
+- `GET /api/profile` — returns `{ id, email, display_name, first_name, last_name, phone1, currency, created_at }`
+- `PATCH /api/profile` — accepts any subset of `first_name`, `last_name`, `phone1`, `display_name`
+
+The service uses a `_has_column` guard so it silently skips updates to fields
+that don't exist on the `profiles` table yet. Run the following migration
+before deploying to populate the new columns:
+
+```sql
+ALTER TABLE profiles
+  ADD COLUMN IF NOT EXISTS first_name text,
+  ADD COLUMN IF NOT EXISTS last_name  text,
+  ADD COLUMN IF NOT EXISTS phone1     text;
+```
+
+Phone numbers are validated with a loose international regex
+(`+`, digits, spaces, dashes, parens — length 7–20). An empty string clears
+the value.
+
+### Budget `spent` is now stored, not computed
+
+`budgets.spent` (float4) is maintained by the transaction service:
+
+- `create_transaction` / `create_transactions_bulk` apply `+amount` to every
+  matching budget.
+- `update_transaction` reverses the old row's impact (`-amount`) and applies
+  the new one (`+amount`) in a single DB transaction.
+- `delete_transaction` applies `-amount`.
+
+A budget is considered "matching" when:
+
+1. it belongs to the same profile and category,
+2. `created_at::date <= transaction_date::date`, and
+3. the transaction date falls inside the current active period
+   (weekly = `date_trunc('week', CURRENT_DATE)` Monday–Sunday,
+   monthly = same year + month as `CURRENT_DATE`,
+   yearly = same year as `CURRENT_DATE`).
+
+Only `type = 'expense'` transactions affect `spent`; income is ignored
+(see the income-handling change in the previous entry).
+
+`services/budget_service.get_budgets` now reads `COALESCE(b.spent, 0) AS spent_amount`
+directly — no transactions JOIN — when the column exists. If the column is
+missing it falls back to the previous computed-from-transactions query.
+
+Run this migration once per deployment:
+
+```sql
+ALTER TABLE budgets
+  ADD COLUMN IF NOT EXISTS spent real NOT NULL DEFAULT 0;
+```
+
+> **Caveat:** the stored value does not auto-reset when a new weekly/monthly/yearly
+> period starts. A scheduled job or on-read period-change check is a follow-up.
+
+### Tests
+
+`tests/test_schemas.py` covers `validate_update` for the profile schema
+(valid payload, partial update, clearing phone, invalid phone, unknown-field
+ignoring, non-string rejection). `tests/test_handler.py` adds an
+`unauthenticated_profile` case confirming `/api/profile` returns 401 without a
+token. No DB-integration tests are added — the handler/schema layer is still
+the only unit-tested surface.

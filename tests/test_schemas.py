@@ -7,6 +7,7 @@ from schemas.transaction_schema import validate_create as validate_txn_create
 from schemas.transaction_schema import validate_update as validate_txn_update
 from schemas.category_schema import validate_create as validate_cat_create
 from schemas.budget_schema import validate_create as validate_budget_create
+from schemas.profile_schema import validate_update as validate_profile_update
 
 
 def test_transaction_create_valid():
@@ -96,3 +97,46 @@ def test_budget_create_zero_amount():
     cleaned, errors = validate_budget_create(data)
     assert cleaned is None
     assert "limit_amount" in errors
+
+
+def test_profile_update_valid():
+    data = {
+        "first_name": "  Jane  ",
+        "last_name": "Doe",
+        "phone1": "+1 (555) 123-4567",
+    }
+    cleaned, errors = validate_profile_update(data)
+    assert errors is None
+    assert cleaned["first_name"] == "Jane"
+    assert cleaned["last_name"] == "Doe"
+    assert cleaned["phone1"] == "+1 (555) 123-4567"
+
+
+def test_profile_update_partial():
+    cleaned, errors = validate_profile_update({"first_name": "Alex"})
+    assert errors is None
+    assert cleaned == {"first_name": "Alex"}
+
+
+def test_profile_update_clears_phone():
+    cleaned, errors = validate_profile_update({"phone1": ""})
+    assert errors is None
+    assert cleaned == {"phone1": ""}
+
+
+def test_profile_update_invalid_phone():
+    cleaned, errors = validate_profile_update({"phone1": "abc"})
+    assert cleaned is None
+    assert "phone1" in errors
+
+
+def test_profile_update_ignores_unknown_fields():
+    cleaned, errors = validate_profile_update({"email": "x@y.z", "role": "admin"})
+    assert errors is None
+    assert cleaned == {}
+
+
+def test_profile_update_rejects_non_string_name():
+    cleaned, errors = validate_profile_update({"first_name": 123})
+    assert cleaned is None
+    assert "first_name" in errors

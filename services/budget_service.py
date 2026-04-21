@@ -16,20 +16,17 @@ def _has_column(cur, table, column):
 
 def get_budgets(profile_id):
     """
-    Fetch all budgets with spent_amount calculated from expense transactions.
-    Only transactions that occurred on or after the budget's created_at date
-    are counted, so new budgets always start at $0 spent.
+    Fetch all budgets, reading the stored `spent` column directly.
+    `spent` is kept in sync by the transaction service (create/update/delete),
+    so we no longer need to recompute it from the transactions table here.
+
     If the income_applied column exists, it raises the budget ceiling.
+    Falls back to computing `spent` from transactions when the column is missing.
     """
     with get_cursor() as cur:
         has_income_applied = _has_column(cur, "budgets", "income_applied")
+        has_spent = _has_column(cur, "budgets", "spent")
         has_created_at = _has_column(cur, "budgets", "created_at")
-
-        spent_expr = """
-            COALESCE(SUM(
-                CASE WHEN t.type = 'expense' THEN t.amount ELSE 0 END
-            ), 0)
-        """
 
         # Income applied increases the budget ceiling, not reduces spent
         if has_income_applied:
@@ -37,12 +34,33 @@ def get_budgets(profile_id):
         else:
             limit_expr = "b.limit_amount"
 
-        # Only count transactions created after the budget was created
+        if has_spent:
+            # Stored spent — maintained by transaction service.
+            cur.execute(
+                f"""
+                SELECT b.*,
+                       c.name AS category_name,
+                       c.color AS category_color,
+                       COALESCE(b.spent, 0) AS spent_amount,
+                       ({limit_expr}) AS effective_limit
+                  FROM budgets b
+                  LEFT JOIN categories c ON c.id = b.category_id
+                 WHERE b.profile_id = %s
+                """,
+                (profile_id,),
+            )
+            return cur.fetchall()
+
+        # Fallback: compute from transactions (pre-migration behavior).
         created_at_filter = (
             "AND t.transaction_date >= b.created_at::date"
             if has_created_at else ""
         )
-
+        spent_expr = """
+            COALESCE(SUM(
+                CASE WHEN t.type = 'expense' THEN t.amount ELSE 0 END
+            ), 0)
+        """
         cur.execute(
             f"""
             SELECT b.*,

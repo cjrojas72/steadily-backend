@@ -6,6 +6,62 @@ from db import get_cursor
 ALLOWED_SORT_COLUMNS = {"transaction_date", "amount", "created_at", "description"}
 
 
+def _update_budget_spent(cur, profile_id, transaction, multiplier):
+    """
+    Apply a delta to the `spent` field of every budget affected by this transaction.
+
+    multiplier: +1 when adding (create), -1 when reversing (delete, or old side of update).
+
+    A budget is affected if:
+      - it belongs to the same profile and category
+      - it was created on or before the transaction date
+      - the transaction date falls within the budget's current active period
+        (weekly: Monday–Sunday, monthly: same year+month, yearly: same year)
+
+    Only `expense` transactions affect budget `spent`. Income is ignored.
+    """
+    if not transaction or transaction.get("type") != "expense":
+        return
+
+    txn_date = transaction["transaction_date"]
+    category_id = transaction["category_id"]
+    amount = transaction["amount"]
+
+    cur.execute(
+        """
+        SELECT id FROM budgets
+         WHERE profile_id = %s
+           AND category_id = %s
+           AND created_at::date <= %s::date
+           AND (
+               (period = 'monthly'
+                AND EXTRACT(YEAR FROM %s::date) = EXTRACT(YEAR FROM CURRENT_DATE)
+                AND EXTRACT(MONTH FROM %s::date) = EXTRACT(MONTH FROM CURRENT_DATE))
+            OR (period = 'weekly'
+                AND %s::date >= date_trunc('week', CURRENT_DATE)::date
+                AND %s::date < (date_trunc('week', CURRENT_DATE) + INTERVAL '7 days')::date)
+            OR (period = 'yearly'
+                AND EXTRACT(YEAR FROM %s::date) = EXTRACT(YEAR FROM CURRENT_DATE))
+           )
+        """,
+        (
+            profile_id, category_id, txn_date,
+            txn_date, txn_date,          # monthly
+            txn_date, txn_date,          # weekly
+            txn_date,                    # yearly
+        ),
+    )
+    budget_ids = [row["id"] for row in cur.fetchall()]
+    if not budget_ids:
+        return
+
+    delta = multiplier * float(amount)
+    cur.execute(
+        "UPDATE budgets SET spent = COALESCE(spent, 0) + %s WHERE id = ANY(%s)",
+        (delta, budget_ids),
+    )
+
+
 def get_transactions(profile_id, filters):
     where = "WHERE profile_id = %s"
     params = [profile_id]
@@ -68,7 +124,9 @@ def create_transaction(profile_id, data):
                 data.get("source", "manual"),
             ),
         )
-        return cur.fetchone()
+        txn = cur.fetchone()
+        _update_budget_spent(cur, profile_id, txn, +1)
+        return txn
 
 
 def create_transactions_bulk(profile_id, data_list):
@@ -86,7 +144,9 @@ def create_transactions_bulk(profile_id, data_list):
                     data.get("source", "manual"),
                 ),
             )
-            results.append(cur.fetchone())
+            txn = cur.fetchone()
+            _update_budget_spent(cur, profile_id, txn, +1)
+            results.append(txn)
     return results
 
 
@@ -94,25 +154,50 @@ def update_transaction(profile_id, transaction_id, data):
     if not data:
         return get_transaction(profile_id, transaction_id)
 
-    set_parts = []
-    params = []
-    for key, value in data.items():
-        set_parts.append(f"{key} = %s")
-        params.append(value)
-    params.extend([transaction_id, profile_id])
-
     with get_cursor(commit=True) as cur:
+        # Fetch the pre-update version so we can reverse its budget impact
+        cur.execute(
+            "SELECT * FROM transactions WHERE id = %s AND profile_id = %s",
+            (transaction_id, profile_id),
+        )
+        old = cur.fetchone()
+        if not old:
+            return None
+
+        set_parts = []
+        params = []
+        for key, value in data.items():
+            set_parts.append(f"{key} = %s")
+            params.append(value)
+        params.extend([transaction_id, profile_id])
+
         cur.execute(
             f"UPDATE transactions SET {', '.join(set_parts)} WHERE id = %s AND profile_id = %s RETURNING *",
             params,
         )
-        return cur.fetchone()
+        new = cur.fetchone()
+
+        # Reconcile budget spent: reverse old impact, apply new impact
+        _update_budget_spent(cur, profile_id, old, -1)
+        _update_budget_spent(cur, profile_id, new, +1)
+
+        return new
 
 
 def delete_transaction(profile_id, transaction_id):
     with get_cursor(commit=True) as cur:
         cur.execute(
-            "DELETE FROM transactions WHERE id = %s AND profile_id = %s RETURNING id",
+            "SELECT * FROM transactions WHERE id = %s AND profile_id = %s",
             (transaction_id, profile_id),
         )
-        return cur.fetchone() is not None
+        old = cur.fetchone()
+        if not old:
+            return False
+
+        cur.execute(
+            "DELETE FROM transactions WHERE id = %s AND profile_id = %s",
+            (transaction_id, profile_id),
+        )
+
+        _update_budget_spent(cur, profile_id, old, -1)
+        return True

@@ -1,6 +1,6 @@
 import json
 
-from routes import auth, transactions, categories, budgets, analytics
+from routes import auth, transactions, categories, budgets, analytics, profile
 from utils.response import success, error, cors_preflight, set_request_origin
 
 
@@ -35,6 +35,8 @@ def handler(event, context):
             return budgets.handle(event, method, path)
         elif path.startswith("/api/analytics"):
             return analytics.handle(event, method, path)
+        elif path.startswith("/api/profile"):
+            return profile.handle(event, method, path)
         else:
             return error("Not found", 404)
     except Exception as e:
