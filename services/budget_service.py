@@ -96,21 +96,15 @@ def create_budget(profile_id, data):
     """
     Insert a new budget. Returns (row, error_message).
 
-    If a budget already exists for the same (profile, category, period),
-    returns (None, "A budget for this category and period already exists").
-    Delete the existing one first if you want to replace it.
+    Multiple budgets for the same (profile, category, period) are allowed —
+    each one tracks the same underlying spending independently, so a single
+    transaction in the matching category will increment every applicable
+    budget's `spent` field.
     """
     period = data.get("period", "monthly")
     category_id = data["category_id"]
 
     with get_cursor(commit=True) as cur:
-        cur.execute(
-            "SELECT id FROM budgets WHERE profile_id = %s AND category_id = %s AND period = %s",
-            (profile_id, category_id, period),
-        )
-        if cur.fetchone():
-            return None, "A budget for this category and period already exists"
-
         budget_id = str(uuid.uuid4())
         cur.execute(
             """INSERT INTO budgets (id, profile_id, category_id, limit_amount, period, title, description)
