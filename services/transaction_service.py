@@ -6,6 +6,15 @@ from db import get_cursor
 ALLOWED_SORT_COLUMNS = {"transaction_date", "amount", "created_at", "description"}
 
 
+def _has_column(cur, table, column):
+    cur.execute(
+        """SELECT 1 FROM information_schema.columns
+           WHERE table_name = %s AND column_name = %s""",
+        (table, column),
+    )
+    return cur.fetchone() is not None
+
+
 def _update_budget_spent(cur, profile_id, transaction, multiplier):
     """
     Apply a delta to the `spent` field of every budget affected by this transaction.
@@ -14,52 +23,85 @@ def _update_budget_spent(cur, profile_id, transaction, multiplier):
 
     A budget is affected if:
       - it belongs to the same profile and category
-      - it was created on or before the transaction date
+      - (if budgets.created_at exists) it was created on or before the transaction date
       - the transaction date falls within the budget's current active period
         (weekly: Monday–Sunday, monthly: same year+month, yearly: same year)
 
     Only `expense` transactions affect budget `spent`. Income is ignored.
+
+    If the budgets table doesn't have a `spent` column yet, this is a no-op —
+    the list view in budget_service falls back to computing spent from
+    transactions in that case.
+
+    This helper is wrapped in a SAVEPOINT so that a failure here never aborts
+    the parent transaction (e.g. the INSERT INTO transactions). Worst case,
+    `spent` falls out of sync; it can always be recomputed.
     """
     if not transaction or transaction.get("type") != "expense":
         return
 
-    txn_date = transaction["transaction_date"]
-    category_id = transaction["category_id"]
-    amount = transaction["amount"]
+    # SAVEPOINT lets us isolate errors from the parent DB transaction.
+    # Without this, a failure here puts the connection into an aborted state
+    # and the subsequent COMMIT rolls back the transaction INSERT too.
+    cur.execute("SAVEPOINT budget_sync")
+    try:
+        if not _has_column(cur, "budgets", "spent"):
+            cur.execute("RELEASE SAVEPOINT budget_sync")
+            return
 
-    cur.execute(
-        """
-        SELECT id FROM budgets
-         WHERE profile_id = %s
-           AND category_id = %s
-           AND created_at::date <= %s::date
-           AND (
-               (period = 'monthly'
-                AND EXTRACT(YEAR FROM %s::date) = EXTRACT(YEAR FROM CURRENT_DATE)
-                AND EXTRACT(MONTH FROM %s::date) = EXTRACT(MONTH FROM CURRENT_DATE))
-            OR (period = 'weekly'
-                AND %s::date >= date_trunc('week', CURRENT_DATE)::date
-                AND %s::date < (date_trunc('week', CURRENT_DATE) + INTERVAL '7 days')::date)
-            OR (period = 'yearly'
-                AND EXTRACT(YEAR FROM %s::date) = EXTRACT(YEAR FROM CURRENT_DATE))
-           )
-        """,
-        (
-            profile_id, category_id, txn_date,
-            txn_date, txn_date,          # monthly
-            txn_date, txn_date,          # weekly
-            txn_date,                    # yearly
-        ),
-    )
-    budget_ids = [row["id"] for row in cur.fetchall()]
-    if not budget_ids:
-        return
+        txn_date = transaction["transaction_date"]
+        category_id = transaction["category_id"]
+        amount = transaction["amount"]
 
-    delta = multiplier * float(amount)
-    cur.execute(
-        "UPDATE budgets SET spent = COALESCE(spent, 0) + %s WHERE id = ANY(%s)",
-        (delta, budget_ids),
-    )
+        has_created_at = _has_column(cur, "budgets", "created_at")
+        created_at_filter = (
+            "AND created_at::date <= %s::date" if has_created_at else ""
+        )
+
+        params = [profile_id, category_id]
+        if has_created_at:
+            params.append(txn_date)
+        # monthly (twice) + weekly (twice) + yearly (once) = 5
+        params.extend([txn_date, txn_date, txn_date, txn_date, txn_date])
+
+        cur.execute(
+            f"""
+            SELECT id FROM budgets
+             WHERE profile_id = %s
+               AND category_id = %s
+               {created_at_filter}
+               AND (
+                   (period = 'monthly'
+                    AND EXTRACT(YEAR FROM %s::date) = EXTRACT(YEAR FROM CURRENT_DATE)
+                    AND EXTRACT(MONTH FROM %s::date) = EXTRACT(MONTH FROM CURRENT_DATE))
+                OR (period = 'weekly'
+                    AND %s::date >= date_trunc('week', CURRENT_DATE)::date
+                    AND %s::date < (date_trunc('week', CURRENT_DATE) + INTERVAL '7 days')::date)
+                OR (period = 'yearly'
+                    AND EXTRACT(YEAR FROM %s::date) = EXTRACT(YEAR FROM CURRENT_DATE))
+               )
+            """,
+            params,
+        )
+        budget_ids = [row["id"] for row in cur.fetchall()]
+
+        if budget_ids:
+            delta = multiplier * float(amount)
+            cur.execute(
+                "UPDATE budgets SET spent = COALESCE(spent, 0) + %s WHERE id = ANY(%s)",
+                (delta, budget_ids),
+            )
+
+        cur.execute("RELEASE SAVEPOINT budget_sync")
+    except Exception as e:
+        # Roll the savepoint back so the cursor is usable again and the parent
+        # transaction (the INSERT INTO transactions) can still commit cleanly.
+        try:
+            cur.execute("ROLLBACK TO SAVEPOINT budget_sync")
+            cur.execute("RELEASE SAVEPOINT budget_sync")
+        except Exception:
+            pass
+        print(f"[_update_budget_spent] non-fatal error: {e}")
 
 
 def get_transactions(profile_id, filters):
