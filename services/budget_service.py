@@ -92,10 +92,50 @@ def get_budgets(profile_id):
         return cur.fetchall()
 
 
-def create_or_update_budget(profile_id, data):
-    """Upsert a budget. Returns (row, created: bool)."""
+def create_budget(profile_id, data):
+    """
+    Insert a new budget. Returns (row, error_message).
+
+    If a budget already exists for the same (profile, category, period),
+    returns (None, "A budget for this category and period already exists").
+    Delete the existing one first if you want to replace it.
+    """
+    period = data.get("period", "monthly")
+    category_id = data["category_id"]
+
     with get_cursor(commit=True) as cur:
-        # Check if budget already exists for this category+period
+        cur.execute(
+            "SELECT id FROM budgets WHERE profile_id = %s AND category_id = %s AND period = %s",
+            (profile_id, category_id, period),
+        )
+        if cur.fetchone():
+            return None, "A budget for this category and period already exists"
+
+        budget_id = str(uuid.uuid4())
+        cur.execute(
+            """INSERT INTO budgets (id, profile_id, category_id, limit_amount, period, title, description)
+               VALUES (%s, %s, %s, %s, %s, %s, %s)
+               RETURNING *""",
+            (
+                budget_id,
+                profile_id,
+                category_id,
+                data["limit_amount"],
+                period,
+                data.get("title", ""),
+                data.get("description", ""),
+            ),
+        )
+        return cur.fetchone(), None
+
+
+def create_or_update_budget(profile_id, data):
+    """
+    Legacy upsert — kept for backwards compatibility with any callers that
+    want upsert semantics. Prefer `create_budget` for the REST create flow.
+    Returns (row, created: bool).
+    """
+    with get_cursor(commit=True) as cur:
         cur.execute(
             "SELECT id FROM budgets WHERE profile_id = %s AND category_id = %s AND period = %s",
             (profile_id, data["category_id"], data.get("period", "monthly")),

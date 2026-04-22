@@ -37,8 +37,10 @@ def create(event, user_id):
     if errs:
         return error(errs, 422)
 
-    budget, created = budget_service.create_or_update_budget(user_id, cleaned)
-    return success(budget, 201 if created else 200)
+    budget, err_msg = budget_service.create_budget(user_id, cleaned)
+    if err_msg:
+        return error(err_msg, 409)
+    return success(budget, 201)
 
 
 def apply_income(event, user_id):

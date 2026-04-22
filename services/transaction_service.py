@@ -23,9 +23,13 @@ def _update_budget_spent(cur, profile_id, transaction, multiplier):
 
     A budget is affected if:
       - it belongs to the same profile and category
-      - (if budgets.created_at exists) it was created on or before the transaction date
       - the transaction date falls within the budget's current active period
         (weekly: Monday–Sunday, monthly: same year+month, yearly: same year)
+
+    We intentionally DO NOT filter on budget.created_at here. This helper only
+    runs against brand-new transaction events (create / update / delete), so
+    every existing budget by definition was created before the transaction
+    was inserted. Adding a created_at filter only introduces timezone bugs.
 
     Only `expense` transactions affect budget `spent`. Income is ignored.
 
@@ -53,23 +57,11 @@ def _update_budget_spent(cur, profile_id, transaction, multiplier):
         category_id = transaction["category_id"]
         amount = transaction["amount"]
 
-        has_created_at = _has_column(cur, "budgets", "created_at")
-        created_at_filter = (
-            "AND created_at::date <= %s::date" if has_created_at else ""
-        )
-
-        params = [profile_id, category_id]
-        if has_created_at:
-            params.append(txn_date)
-        # monthly (twice) + weekly (twice) + yearly (once) = 5
-        params.extend([txn_date, txn_date, txn_date, txn_date, txn_date])
-
         cur.execute(
-            f"""
+            """
             SELECT id FROM budgets
              WHERE profile_id = %s
                AND category_id = %s
-               {created_at_filter}
                AND (
                    (period = 'monthly'
                     AND EXTRACT(YEAR FROM %s::date) = EXTRACT(YEAR FROM CURRENT_DATE)
@@ -81,15 +73,24 @@ def _update_budget_spent(cur, profile_id, transaction, multiplier):
                     AND EXTRACT(YEAR FROM %s::date) = EXTRACT(YEAR FROM CURRENT_DATE))
                )
             """,
-            params,
+            (
+                profile_id, category_id,
+                txn_date, txn_date,   # monthly
+                txn_date, txn_date,   # weekly
+                txn_date,             # yearly
+            ),
         )
         budget_ids = [row["id"] for row in cur.fetchall()]
+        print(
+            f"[_update_budget_spent] matched {len(budget_ids)} budget(s) "
+            f"for category={category_id} txn_date={txn_date} multiplier={multiplier}"
+        )
 
         if budget_ids:
             delta = multiplier * float(amount)
             cur.execute(
-                "UPDATE budgets SET spent = COALESCE(spent, 0) + %s WHERE id = ANY(%s)",
-                (delta, budget_ids),
+                "UPDATE budgets SET spent = COALESCE(spent, 0) + %s WHERE id = ANY(%s::uuid[])",
+                (delta, [str(b) for b in budget_ids]),
             )
 
         cur.execute("RELEASE SAVEPOINT budget_sync")
